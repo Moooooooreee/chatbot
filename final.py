@@ -1,0 +1,303 @@
+import telebot
+import cv2
+import numpy as np
+import pandas as pd
+import time
+from pyzbar.pyzbar import decode
+from datetime import datetime
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import os
+from openpyxl import Workbook, load_workbook
+
+TECH_LOG_FILE = "technician_log.xlsx"
+
+# from openpyxl import load_workbook
+
+TOKEN = '7812784214:AAG3GLhlxcXR_7YeOrwKnI-MjuPOoKMB-Ws'
+bot = telebot.TeleBot(TOKEN)
+
+EXCEL_FILE = "imei_data.xlsx"
+EXCEL_FILE_2 = "database.xlsx"
+
+# Ensure the Excel file exists with necessary sheets
+df1 = pd.read_excel(EXCEL_FILE, sheet_name=0, dtype={"IMEI": str, "Note": str})
+# Ensure 'battery' column exists in the database
+df2 = pd.read_excel(EXCEL_FILE_2, dtype={"IMEI": str})
+if 'battery' not in df2.columns:
+    df2['battery'] = np.nan  # Add battery column with empty values
+    df2.to_excel(EXCEL_FILE_2, index=False)
+
+
+# Dictionary to track user state and extracted IMEI
+user_data = {}
+
+# Command to start the bot
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(
+        message,
+        "مرحبا, يرجى ارسال صوره لرقم الجهاز"
+    )
+# Command to contact support
+@bot.message_handler(commands=['support'])
+def support(message):
+    bot.reply_to(
+        message,
+        "اذا واجهت مشكله برجاء ارسال على جروب ال WhatsApp."
+    )
+# Handle imeis extraction
+@bot.message_handler(content_types=['photo', 'text'])
+def handle_imei(message):
+    try:
+        imei = None
+        if message.content_type == 'photo':
+            # Get the file ID and download the image
+            file_id = message.photo[-1].file_id
+            file_info = bot.get_file(file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            
+            # Convert the image to a format suitable for OpenCV
+            img = np.asarray(bytearray(downloaded_file), dtype=np.uint8)
+            img = cv2.imdecode(img, cv2.IMREAD_COLOR)
+            
+            # Process the image to find barcodes
+            decoded_objects = decode(img)
+            if decoded_objects:
+                imei = decoded_objects[0].data.decode('utf-8')
+                
+                os.makedirs("imei_images", exist_ok=True)  #save imgs with imeis
+                cv2.imwrite(f"imei_images/{imei}.jpg", img)
+                
+        elif message.content_type == 'text':
+            imei = ''.join(filter(str.isdigit, message.text)).lstrip('0')
+            
+            if len(imei) != 15:
+                bot.reply_to(
+                    message,
+                    " يجب أن يحتوي ال IMEI  على 15 رقم\n"
+                    f"الأرقام المدخلة: {imei}\n"
+                    "الرجاء المحاولة مرة أخرى"
+                )
+                return
+                
+        if imei:
+            # Create inline buttons for confirmation
+            markup = InlineKeyboardMarkup()
+            markup.add(
+                InlineKeyboardButton("نعم", callback_data="confirm_yes"),
+                InlineKeyboardButton("لا", callback_data="confirm_no")
+            )
+            user_data[message.chat.id] = {"IMEI": imei}
+            bot.send_message(message.chat.id, f"رقم الجهاز: {imei}\n\nهل هذا الرقم صحيح؟", reply_markup=markup)
+        else:
+            bot.reply_to(message, "من فضلك ارسال صوره اكثر وضوحا")
+    except Exception as e:
+        bot.reply_to(message, f"An error occurred: {str(e)}")
+
+# Handle inline button presses for confirmation
+@bot.callback_query_handler(func=lambda call: call.data in ["confirm_yes", "confirm_no"])
+def handle_confirmation(call):
+    chat_id = call.message.chat.id
+    user_entry = user_data.get(chat_id, {})
+    if call.data == "confirm_yes":
+        imei = user_entry.get("IMEI")
+        if imei:
+            try:
+                date = datetime.now().strftime("%Y-%m-%d %H:%M")
+                df = pd.read_excel(EXCEL_FILE, dtype={"IMEI": str, "Note": str})
+                df = pd.concat([df, pd.DataFrame({"Date": [date], "IMEI": [imei], "Note": [""], "R": [np.nan], "gap": [np.nan]})], ignore_index=True)
+                
+                repeat = 1 # flag to recheck again          
+                activation_msg = 0 # flag for activation msg
+                while repeat == 1:
+                    df2 = pd.read_excel(EXCEL_FILE_2, dtype={"IMEI": str})
+                    imei_row = df2.loc[df2["IMEI"] == imei]
+                                    
+                    if not imei_row.empty:
+                        status = imei_row["status"].values[0]                  
+                        
+                        if status == "inactive":
+                            if activation_msg == 0:
+                                bot.send_message(chat_id, f"Status: {status}")
+                                bot.send_message(chat_id, f"ارسل هذه الرساله مره واحده فقط \nو شغل الجهاز مرتين")
+                                bot.send_message(chat_id, f"3&x!yz,R3=ACTIVE")
+                                done_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("تم", callback_data="activated")]])
+                                bot.send_message(chat_id, "اضغط \"تم\" بعد الانطفاءه الاخرى للجهاز", reply_markup=done_keyboard)
+                                df.loc[(df['Date'] == date) & (df['IMEI'] == imei), 'Note'] = "Activation msg"
+                                activation_msg = 1
+                            repeat = 0  # exit the loop
+                        
+                        elif status == "active":
+                            airgap = imei_row["airgap"].values[0]
+                            src = imei_row["src"].values[0]
+                            rssi = imei_row["rssi"].values[0]
+                            battery = imei_row["battery"].values[0]
+                            try:
+                                battery = float(battery)
+                                if battery < 4.5:
+                                    bot.send_message(chat_id, f"⚠️ مستوى البطارية منخفض: {battery} فولت.\nيرجى تغيير البطارية قبل المتابعة.")
+                            except Exception:
+                                bot.send_message(chat_id, "⚠️ تعذر قراءة مستوى البطارية.")
+
+                            bot.send_message(chat_id, f"القراءات:\nاجمالى الفراغ: {airgap}سم\nSRC: {src}\nRSSI: {rssi}")
+                            append_to_tech_log(imei, f"{airgap}cm", call.from_user.first_name)
+
+                            if src == 10 and rssi == 10:
+                                bot.send_message(chat_id, "كم ارتفاع الجهاز عن الخزان؟")
+                                bot.register_next_step_handler(call.message, get_r, airgap, src, rssi, date, imei)
+                            elif src < 9 and rssi < 9:
+                                bot.send_message(chat_id, "S17=0014FF3C3C")
+                                bot.send_message(chat_id, "تم إرسال أمر التهيئة.\nيرجى إعادة تشغيل الجهاز مرتين ثم إعادة التحقق.")
+
+                                confirm_keyboard = InlineKeyboardMarkup()
+                                confirm_keyboard.add(
+                                    InlineKeyboardButton("✅ أعدت التشغيل مرتين", callback_data="restarted_done"),
+                                    InlineKeyboardButton("❌ لم أعد التشغيل بعد", callback_data="restarted_notyet")
+                                )
+                                bot.send_message(chat_id, "هل قمت بإعادة تشغيل الجهاز مرتين؟", reply_markup=confirm_keyboard)
+
+                            else:
+                                recheck_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("إعادة التحقق", callback_data="recheck")]])
+                                if activation_msg == 1:
+                                    bot.send_message(chat_id, f"برجاء مراجعه التثبيت و التشغيل مره اخرى", reply_markup=recheck_keyboard)
+                                else: # no activation msg, means maintenance
+                                    df.loc[(df['Date'] == date) & (df['IMEI'] == imei), 'Note'] = "Maintenance"
+                                    bot.send_message(chat_id, f"اتبع خطوات الصيانه الاتيه:\n1- نظف العدسه و القاعده\n2- قم بتغير البطاريات\n3- تأكد ان فتحه الخزان ليست اصغر من القاعده و الا سوف تحتاج للتوسيع\n\n ينصح بتركيب انبوب دائما لتجنب ضعف القراءات", reply_markup=recheck_keyboard)
+                            repeat = 0  # exit the loop
+                        # 3ayz a3mel flag f ay recheck 3shan don't save again fel excel
+                    else: # New Device
+                        df2 = pd.read_excel(EXCEL_FILE_2, dtype={"IMEI": str, "status": str})
+                        df2 = pd.concat([df2, pd.DataFrame({"IMEI": [imei], "status": ["inactive"], "airgap": [0], "src": [0], "rssi": [0], "battery": [np.nan]})], ignore_index=True)
+                        df2.to_excel(EXCEL_FILE_2, index=False)
+
+                        df.loc[(df['Date'] == date) & (df['IMEI'] == imei), 'Note'] = "New Device"
+                        bot.send_message(chat_id, "New device,\nIMEI added to the database.")
+                        time.sleep(3) # wait 3 sec till recheck 
+                        repeat = 0  # exit the loop
+                
+                df.to_excel(EXCEL_FILE, index=False)
+            
+            except Exception as e:
+                bot.send_message(chat_id, f"Error reading from database: {str(e)}")
+
+        else:
+            bot.send_message(chat_id, "من فضلك ارسال صوره اكثر وضوحا")
+
+def get_r(message, airgap, src, rssi, date, imei):
+    try:
+        r = int(message.text)
+        bot.send_message(message.chat.id, "كم نسبه الفارغ؟")
+        bot.register_next_step_handler(message, get_gap, airgap, src, rssi, r, date, imei)
+    except ValueError:
+        bot.send_message(message.chat.id, "برجاء إدخال رقم صحيح.")
+        bot.register_next_step_handler(message, get_r, airgap, src, rssi, date, imei)
+
+def get_gap(message, airgap, src, rssi, r, date, imei):
+    try:
+        gap = int(message.text)
+        df = pd.read_excel(EXCEL_FILE, dtype={"IMEI": str, "Note": str})
+        if abs(airgap - (r + gap)) <= 1:
+            bot.send_message(message.chat.id, f"شكرا, القراءات ممتازه تفضل")
+        else:
+            bot.send_message(message.chat.id, f"برجاء مراجعه القياسات \nالاجمالى: {airgap} سم\n\n\nكم ارتفاع الجهاز عن الخزان؟")
+            bot.register_next_step_handler(message, get_r, airgap, src, rssi, date, imei)
+        
+        # Save R and gap to Excel in the same row
+        df.loc[(df['Date'] == date) & (df['IMEI'] == imei), ['R', 'gap']] = [r, gap]
+        df.to_excel(EXCEL_FILE, index=False)
+    except ValueError:
+        bot.send_message(message.chat.id, "برجاء إدخال رقم صحيح.")
+        bot.register_next_step_handler(message, get_gap, airgap, src, rssi, r, date, imei)
+
+@bot.callback_query_handler(func=lambda call: call.data == "recheck")
+def handle_recheck(call):
+    chat_id = call.message.chat.id
+    bot.send_message(chat_id, "جارٍ إعادة التحقق من القراءات...")
+    handle_confirmation(call)
+
+@bot.callback_query_handler(func=lambda call: call.data in ["restarted_done", "restarted_notyet"])
+def handle_restart_confirmation(call):
+    chat_id = call.message.chat.id
+    imei = user_data.get(chat_id, {}).get("IMEI")
+
+    if call.data == "restarted_done":
+        try:
+            df2 = pd.read_excel(EXCEL_FILE_2, dtype={"IMEI": str})
+            imei_row = df2.loc[df2["IMEI"] == imei]
+
+            if not imei_row.empty:
+                src = int(imei_row["src"].values[0])
+                rssi = int(imei_row["rssi"].values[0])
+                battery = imei_row["battery"].values[0]
+                try:
+                    battery = float(battery)
+                    if battery < 4.5:
+                        bot.send_message(chat_id, f"⚠️ مستوى البطارية منخفض: {battery} فولت.\nيرجى تغيير البطارية قبل المتابعة.")
+                except Exception:
+                    bot.send_message(chat_id, "⚠️ تعذر قراءة مستوى البطارية.")
+
+                if src >= 9 and rssi >= 9:
+                    bot.send_message(chat_id, "✅ شكراً لك، تم التحقق من القراءات وهي جيدة. يمكنك الآن المغادرة.")
+                elif src < 9 and rssi < 9:
+                    contact_keyboard = InlineKeyboardMarkup()
+                    contact_keyboard.add(
+                        InlineKeyboardButton("💬 تواصل معنا على WhatsApp", url="https://wa.me/201234567890")
+                    )
+                    bot.send_message(
+                        chat_id,
+                        "❗ مازالت القراءات ضعيفة (SRC و RSSI أقل من 9).\nيرجى التواصل مع فريق الدعم عبر WhatsApp.",
+                        reply_markup=contact_keyboard,
+                    )
+                else:
+                    bot.send_message(chat_id, "تم استلام قراءات جيدة بعد إعادة التشغيل ✅")
+            else:
+                bot.send_message(chat_id, "🔍 لم يتم العثور على الجهاز في قاعدة البيانات.")
+        except Exception as e:
+            bot.send_message(chat_id, f"⚠️ حدث خطأ أثناء التحقق من البيانات: {str(e)}")
+
+    elif call.data == "restarted_notyet":
+        bot.send_message(chat_id, "🔁 يرجى إعادة تشغيل الجهاز مرتين على الأقل.")
+        confirm_keyboard = InlineKeyboardMarkup()
+        confirm_keyboard.add(
+            InlineKeyboardButton("✅ أعدت التشغيل مرتين", callback_data="restarted_done"),
+            InlineKeyboardButton("❌ لم أعد التشغيل بعد", callback_data="restarted_notyet"),
+        )
+        bot.send_message(chat_id, "هل قمت بإعادة تشغيل الجهاز مرتين؟", reply_markup=confirm_keyboard)
+
+@bot.callback_query_handler(func=lambda call: call.data == "activated")
+def handle_activated(call):
+    bot.send_message(call.message.chat.id, "لم يتم التفعيل بعد,\n برجاء الانتظار او التشغيل مره اخرى \nثم اضغط على \"تم\" مجددا")
+
+print("Bot is ready.")
+bot.infinity_polling()
+
+
+def append_to_tech_log(imei, note, technician=""):
+    from datetime import datetime
+    row = [
+        datetime.now().strftime("%Y-%m-%d %H:%M"),
+        imei,
+        "waveguide installed",
+        "Fixed",
+        note,
+        "",               # Spectro actions
+        technician,
+        "Unique",         # Problem
+        "Unique",         # Count
+    ]
+
+    if not os.path.exists(TECH_LOG_FILE):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws.append(["Visit date", "IMEI", "Work done", "Status", "Notes", "Spectro actions", "Technician", "Problem", "Count"])
+        ws.append(row)
+        wb.save(TECH_LOG_FILE)
+    else:
+        wb = load_workbook(TECH_LOG_FILE)
+        ws = wb.active
+        ws.append(row)
+        wb.save(TECH_LOG_FILE)
+
+
+print("Bot is ready.")

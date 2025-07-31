@@ -70,10 +70,11 @@ def handle_auth_steps(message):
     if current_state == "awaiting_password":
         if message.text == PASSWORD:
         
-            user_states[chat_id] = {
+            user_states.setdefault(chat_id, {}).update({
                 "state": "awaiting_phone",
                 "name": f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
-            }
+            })
+
 
 
             
@@ -154,7 +155,7 @@ def handle_imei(message):
             )
    
             
-            user_states[chat_id] = {"IMEI": imei}
+            user_states.setdefault(chat_id, {}).update({"IMEI": imei})
 
 
             bot.send_message(message.chat.id, f"رقم الجهاز: {imei}\n\nهل هذا الرقم صحيح؟", reply_markup=markup)
