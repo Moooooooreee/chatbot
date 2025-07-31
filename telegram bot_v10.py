@@ -179,7 +179,16 @@ def handle_confirmation(call):
                 df = pd.read_excel(Visits, dtype={"IMEI": str, "Work done": str})
 
      
-                df = pd.concat([df, pd.DataFrame({"Visit date": [date], "IMEI": [imei], "Work done": [""], "Status": ["Incomplete"],"Raiser": [np.nan], "Gap": [np.nan], "Technician": [tech_name]})], ignore_index=True)
+                if not ((df["Visit date"] == date) & (df["IMEI"] == imei)).any():
+                    df = pd.concat([df, pd.DataFrame({
+                        "Visit date": [date],
+                        "IMEI": [imei],
+                        "Work done": [""],
+                        "Status": ["Incomplete"],
+                        "Raiser": [np.nan],
+                        "Gap": [np.nan],
+                        "Technician": [tech_name]
+                    })], ignore_index=True)
 
 
                 # repeat = 1 # flag to recheck again
