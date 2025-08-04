@@ -181,12 +181,12 @@ def handle_confirmation(call):
      
                 if not ((df["Visit date"] == date) & (df["IMEI"] == imei)).any():
                     df = pd.concat([df, pd.DataFrame({
-                        "Visit date": [date],
+                        "Date": [date],
                         "IMEI": [imei],
-                        "Work done": [""],
+                        "Note": [""],
                         "Status": ["Incomplete"],
-                        "Raiser": [np.nan],
-                        "Gap": [np.nan],
+                        "R": [np.nan],
+                        "gap": [np.nan],
                         "Technician": [tech_name]
                     })], ignore_index=True)
 
